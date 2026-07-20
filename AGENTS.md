@@ -1,29 +1,365 @@
-You are working on a Python FastAPI project.
+# YouTube LINE Notifier 開発エージェント向け指示
 
-Requirements
+## 1. プロジェクトの目的
 
-- Never expose .env
-- Never modify .env
-- Never modify Docker ports
-- Existing API behaviour must not change
-- Refactor only
-- Use small commits
-- Build after each major change
-- Run docker compose up -d --build
-- Verify /health
-- Verify WebSub GET
-- Verify WebSub POST
-- Existing containers must remain running
+このアプリケーションは、YouTube WebSubでチャンネル更新を受信し、YouTube Atom XMLを解析して、新着動画をLINE Messaging APIで通知する。
 
-Goal
+同じ動画の重複通知を防ぎ、LINE送信に失敗した場合は後から再試行できるようにする。
 
-Split responsibilities into
+実行環境は次の通り。
 
-app/
-    main.py
-    config.py
-    database.py
-    youtube.py
-    line.py
-    video_repository.py
-    notification_service.py
+* Ubuntu 22.04
+* Docker Compose
+* Python 3.10
+* FastAPI
+* SQLite
+* LINE Messaging API
+
+## 2. 作業開始時の手順
+
+編集を始める前に、必ず次を行う。
+
+1. この`AGENTS.md`を読む
+2. 除外対象を除くプロジェクトファイルを読む
+3. `git status`を実行する
+4. 現在の実装と未コミット変更を確認する
+5. 複数ファイル、データ構造、外部仕様、セキュリティ、実行環境に影響する変更では、編集前に短い作業計画を提示する
+
+変更は小さく、確認しやすい単位で行う。
+
+依頼されていない既存動作は変更しない。
+
+## 3. 読み取り・編集禁止対象
+
+次のファイルやディレクトリは、読み取り、表示、編集、コピー、コミットを行わない。
+
+* `.env`
+* `.git/`
+* `data/`
+* SQLiteデータベースファイル
+* 秘密鍵
+* アクセストークン
+* ユーザーID
+* 認証情報
+* 秘密情報を含むバックアップファイル
+
+環境変数の値を表示しない。
+
+次の環境変数名は参照してよいが、値は表示しない。
+
+* `LINE_CHANNEL_ACCESS_TOKEN`
+* `LINE_USER_ID`
+
+`AGENTS.md`は、利用者から明示的に依頼された場合に限り編集する。
+
+## 4. 現在のアプリケーション構成
+
+### `app/main.py`
+
+* FastAPIアプリケーション
+* HTTPエンドポイント
+* HTTPエラーへの変換
+
+### `app/config.py`
+
+* 環境変数の読み込み
+
+### `app/database.py`
+
+* SQLite接続
+* テーブル初期化
+
+### `app/youtube.py`
+
+* YouTube Atom XMLの解析
+
+### `app/line.py`
+
+* LINE Messaging APIへの送信
+
+### `app/video_repository.py`
+
+* 通知済み動画の管理
+* 通知処理権の管理
+
+### `app/notification_service.py`
+
+* 重複通知防止
+* 通知処理権の取得
+* LINE通知
+* 成功時の履歴保存
+* 失敗時の処理権解放
+
+### `tests/`
+
+* 単体テスト
+* HTTPエンドポイントテスト
+
+この責務分担を維持する。
+
+明確な必要性がない限り、ファイル移動や新しい階層の追加は行わない。
+
+## 5. 維持する外部仕様
+
+明示的な変更依頼がない限り、次を維持する。
+
+* `GET /`
+* `GET /health`
+* `GET /websub`
+* `POST /websub`
+* 既存のJSONレスポンス形式
+* 既存の環境変数名
+* Docker Composeのサービス名
+* ホスト側の`127.0.0.1:8100`
+* コンテナ側の`8000`
+
+アプリケーションの外部公開範囲を拡大しない。
+
+## 6. WebSubの要件
+
+### `GET /websub`
+
+次を満たすこと。
+
+* WebSub検証用クエリパラメーターを受け取る
+* 対応するモードを検証する
+* YouTubeのトピック形式を検証する
+* `hub.challenge`をプレーンテキストで返す
+
+### `POST /websub`
+
+次を満たすこと。
+
+* YouTube Atom XMLを受信する
+* 不正または必須項目が不足したXMLをHTTP 400で拒否する
+* 必要な動画情報を解析する
+* 通知サービスを呼び出す
+* 重複通知防止の動作を維持する
+* 外部API障害を適切なHTTPレスポンスへ変換する
+
+デバッグ目的であっても、XML本文全体を不用意にログ出力しない。
+
+## 7. 通知処理の要件
+
+通知処理では、次を保証する。
+
+1. 同じ`video_id`を複数回LINEへ送信しない
+2. 同じ`video_id`のリクエストが同時に到着しても、LINE送信は1回だけにする
+3. 通知処理権はSQLite上で原子的に取得する
+4. LINE送信成功後にだけ`notified_video`へ保存する
+5. LINE送信失敗を通知成功として保存しない
+6. LINE送信失敗時は通知処理権を解放し、後から再試行可能にする
+7. データベース接続は必ず閉じる
+8. 主キーおよび一意制約を維持する
+
+明示的な承認なしにSQLiteを別のデータストアへ変更しない。
+
+## 8. LINE Messaging APIの要件
+
+LINE APIへの通信は`app/line.py`に集約する。
+
+次を守る。
+
+* 既存の環境変数を使用する
+* 明示的なタイムアウトを設定する
+* HTTPエラーを握りつぶさない
+* Authorizationヘッダーをログへ出さない
+* アクセストークンをログへ出さない
+* 通知先ユーザーIDをログへ出さない
+* 自動テストから実際のLINE APIへ接続しない
+
+## 9. コーディング規約
+
+対象ランタイムはPython 3.10とする。
+
+次を守る。
+
+* 型ヒントを書く
+* 関数は一つの責務に絞る
+* 必要に応じて長い関数を分割する
+* 可能な範囲で標準ライブラリを優先する
+* 外部ライブラリの追加は必要最小限にする
+* 依存関係追加前に理由を説明する
+* 広すぎる例外捕捉を避ける
+* 例外を黙って無視しない
+* 調査に役立つログを残す
+* 秘密情報や機密性のある識別子をログへ出さない
+* 現在のDockerイメージとの互換性を維持する
+
+不要な抽象化は行わない。
+
+一つの機能変更に関連しないコードまで同時にリファクタリングしない。
+
+## 10. テスト要件
+
+自動テストでは外部サービスへ接続しない。
+
+次はモックまたはフェイクを使用する。
+
+* LINE Messaging API
+* 外部HTTP通信
+* 外部WebSubサービス
+
+動作を変更した場合は、関連するテストを追加または修正する。
+
+主な確認対象は次の通り。
+
+* 正常なYouTube Atom XML
+* 不正なXML
+* `entry`がないXML
+* 必須項目が不足したXML
+* SQLite初期化
+* 通知処理権の取得
+* 通知成功履歴の保存
+* 重複通知の抑止
+* 同時に到着した重複リクエスト
+* LINE送信失敗
+* 失敗時の通知処理権解放
+* 失敗後の再試行
+* WebSub検証GET
+* WebSub通知POST
+
+完了報告前に全テストを実行する。
+
+## 11. Dockerおよびホスト環境の安全
+
+このホストでは、別用途のコンテナも稼働している。
+
+* KonomiTV
+* EPGStation
+* Mirakurun
+* MariaDB
+* InfluxDB
+* Grafana
+
+次を行わない。
+
+* 関係のないコンテナを停止する
+* Dockerデーモンを再起動する
+* 関係のないイメージ、ボリューム、ネットワーク、コンテナを削除する
+* 他のComposeプロジェクトを変更する
+* `docker system prune`を実行する
+* ホストのファイアウォール設定を変更する
+* ホストのネットワーク設定を変更する
+* 新しいポートを外部公開する
+* privilegedコンテナを使用する
+
+プロジェクトディレクトリは次の場所とする。
+
+`/opt/youtube-line-notifier`
+
+標準の更新コマンドは次とする。
+
+```bash
+docker compose up -d --build
+```
+
+必要性があり、利用者から承認された場合を除き、`docker compose down`は実行しない。
+
+## 12. Gitのルール
+
+編集前に次を実行する。
+
+```bash
+git status
+```
+
+無関係な未コミット変更を上書きしない。
+
+一つの目的につき一つの小さなコミットを作成する。
+
+コミットメッセージは簡潔な英語とする。
+
+明示的な依頼なしに次を行わない。
+
+* amend
+* squash
+* rebase
+* reset
+* force push
+* ブランチ削除
+* タグ削除
+* 自動Push
+
+完了前に次を確認する。
+
+```bash
+git status
+git diff --stat
+git diff --check
+```
+
+## 13. 必須の検証
+
+アプリケーションを変更した場合は、影響範囲に応じて次を実行する。
+
+```bash
+python -m unittest discover -s tests -v
+docker compose up -d --build
+docker compose ps
+curl -sS -i http://127.0.0.1:8100/health
+docker compose logs --tail=100 notifier
+```
+
+WebSubに関係する変更では、GETとPOSTも確認する。
+
+関係のない既存コンテナが継続稼働していることを確認する。
+
+実行できなかった確認項目がある場合は、未確認として明示する。
+
+## 14. 完了報告
+
+作業完了時は、次を報告する。
+
+* 実装内容
+* 変更したファイル
+* 作成したコミット
+* 実行したテスト
+* テスト結果
+* Dockerビルド結果
+* コンテナ稼働状態
+* エンドポイント確認結果
+* データベースへの影響
+* セキュリティへの影響
+* 残っている課題やリスク
+* `git diff --stat`
+* 現在の`git status`
+
+必要な検証に失敗した場合や実行していない場合は、成功したと報告しない。
+
+## 15. 承認が必要な設計変更
+
+次を変更する前に、利用者の承認を得る。
+
+* 外部APIの動作
+* データベーススキーマの意味
+* 重複通知防止の保証
+* 環境変数名
+* Dockerポート
+* Composeサービス名
+* 外部公開範囲
+* 認証方式
+* 配置構成
+* データストア
+* 新しい外部依存ライブラリ
+
+提案時は次を説明する。
+
+* 変更が必要な理由
+* 検討した代替案
+* 移行への影響
+* 元へ戻す方法
+* セキュリティへの影響
+
+## 16. Obsidianドキュメント
+
+意味のある実装変更または設計変更が完了した場合は、次のObsidianノートへ追記する内容を提案する。
+
+* `02_進捗管理.md`
+* `03_システム構成.md`
+* `04_設計判断(ADR).md`
+* `05_環境構築.md`
+* `11_運用手順.md`
+* `12_障害対応.md`
+
+明示的な依頼がない限り、Obsidian Vault自体は編集しない。
