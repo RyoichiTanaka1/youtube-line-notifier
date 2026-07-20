@@ -5,11 +5,9 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from .line import push_message
-
-from .youtube import parse_youtube_notification
-
 from .database import init_db
+from .notification_service import notify_video
+from .youtube import parse_youtube_notification
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("youtube-line-notifier")
@@ -65,14 +63,8 @@ async def receive_websub(request: Request) -> dict[str, str]:
         notification.title,
     )
 
-    message = (
-        "YouTube新着動画\n\n"
-        f"{notification.title}\n\n"
-        f"{notification.video_url}"
-    )
-
     try:
-        await push_message(message)
+        notified = await notify_video(notification)
     except httpx.HTTPStatusError as exc:
         logger.error(
             "LINE API error: status=%s response=%s request_id=%s",
@@ -98,13 +90,19 @@ async def receive_websub(request: Request) -> dict[str, str]:
             detail="Failed to connect to LINE API",
         ) from exc
 
-    logger.info(
-        "LINE notification sent: video_id=%s",
-        notification.video_id,
-    )
+    if notified:
+        logger.info(
+            "LINE notification sent: video_id=%s",
+            notification.video_id,
+        )
+    else:
+        logger.info(
+            "LINE notification skipped: video_id=%s",
+            notification.video_id,
+        )
 
     return {
-        "result": "notified",
+        "result": "notified" if notified else "already_notified",
         "video_id": notification.video_id,
         "channel_id": notification.channel_id,
         "title": notification.title,
@@ -144,29 +142,6 @@ async def verify_websub(
         )
 
     return hub_challenge
-
-
-@app.post("/websub")
-async def receive_websub(request: Request) -> dict[str, str | int]:
-    body = await request.body()
-
-    logger.info(
-        "WebSub notification received: content_type=%s bytes=%d",
-        request.headers.get("content-type"),
-        len(body),
-    )
-
-    logger.info(
-        "WebSub body preview: %s",
-        body[:1000].decode("utf-8", errors="replace"),
-    )
-
-    return {
-        "result": "accepted",
-        "bytes": len(body),
-    }
-
 @app.on_event("startup")
-async def startup():
-
+async def startup() -> None:
     init_db()

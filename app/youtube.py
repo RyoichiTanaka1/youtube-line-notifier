@@ -15,7 +15,10 @@ class YouTubeNotification:
 
 
 def parse_youtube_notification(xml_body: bytes) -> YouTubeNotification:
-    root = ElementTree.fromstring(xml_body)
+    try:
+        root = ElementTree.fromstring(xml_body)
+    except ElementTree.ParseError as exc:
+        raise ValueError("Invalid Atom XML") from exc
 
     entry = root.find(f"{{{ATOM_NS}}}entry")
     if entry is None:
